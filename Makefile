@@ -1,6 +1,6 @@
 .PHONY: install bpf bpf/tc_egress.o bpf/xdp_ingress.o
 
-BPF_CFLAGS := -O2 -target bpf -Wall -I bpf/headers
+BPF_CFLAGS := -O2 -target bpf -Wall -I bpf -I pkg/bpf/headers
 
 bpf/tc_egress.o: bpf/tc_egress.c
 	clang $(BPF_CFLAGS) -c $< -o $@
