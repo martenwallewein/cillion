@@ -44,8 +44,10 @@
 ## Phase 3: The Go Control Plane (K8s to eBPF Sync)
 *Goal: Write the agent that listens to K8s and populates the eBPF maps dynamically.*
 
-- [ ] **Generate eBPF Go Bindings:**
-  - Use the `cilium/ebpf/cmd/bpf2go` tool to automatically generate Go code from your `tc_egress.c` and `xdp_ingress.c` files.
+- [x] **Generate eBPF Go Bindings:**
+  - `pkg/bpf/gen.go` holds `//go:generate` directives; run `make generate` to emit typed wrappers.
+  - `pkg/bpf/types.go` — `ScionPathEntry` Go struct mirroring `bpf/maps.h`, plus `IPToKey` helper.
+  - `pkg/bpf/loader.go` — `Loader` struct wrapping generated objects: `Load`, `AttachTC`, `AttachXDP`, map CRUD, `Close`.
 - [ ] **Initialize the CilION Agent (`cmd/cilion-agent`):**
   - Write the startup logic to watch for `veth` interfaces created by the base CNI and attach the TC eBPF program to them.
   - Attach the XDP program to the host's physical interface (`eth0`).
