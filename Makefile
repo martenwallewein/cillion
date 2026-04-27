@@ -1,7 +1,17 @@
-.PHONY: install
+.PHONY: install bpf bpf/tc_egress.o bpf/xdp_ingress.o
+
+BPF_CFLAGS := -O2 -target bpf -Wall -I bpf/headers
+
+bpf/tc_egress.o: bpf/tc_egress.c
+	clang $(BPF_CFLAGS) -c $< -o $@
+
+bpf/xdp_ingress.o: bpf/xdp_ingress.c
+	clang $(BPF_CFLAGS) -c $< -o $@
+
+bpf: bpf/tc_egress.o bpf/xdp_ingress.o
 
 install:
-	
+
 	apt-get install -y clang llvm libbpf-dev linux-tools-$(shell uname -r)
 	# Docker
 	if ! command -v docker >/dev/null 2>&1; then \

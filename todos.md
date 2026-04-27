@@ -14,8 +14,10 @@
 - [ ] **Setup Local SCION Topology:**
   - Clone the official `scion-proto/scion` repository. Add as submodule.
   - Run their local topology generator to create a simulated 3-AS network on your host machine.
-- [ ] **Makefile eBPF Compilation:**
-  - Write a `Makefile` target that uses `clang -O2 -target bpf` to compile `bpf/tc_egress.c` into `bpf/tc_egress.o`.
+- [x] **Makefile eBPF Compilation:**
+  - `make bpf/tc_egress.o` — compiles `bpf/tc_egress.c` into `bpf/tc_egress.o` via `clang -O2 -target bpf`.
+  - `make bpf/xdp_ingress.o` — compiles `bpf/xdp_ingress.c` into `bpf/xdp_ingress.o` via `clang -O2 -target bpf`.
+  - `make bpf` — builds both objects.
 
 ## Phase 2: The eBPF Data Plane (Static Encapsulation)
 *Goal: Successfully wrap a packet in a SCION header using eBPF, bypassing the Go control plane for now.*
