@@ -1,0 +1,107 @@
+package controllers
+
+import (
+	"context"
+	"reflect"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+
+	// Hypothetical import for your Custom Resource Definition
+	// myappv1 "github.com/example/operator/api/v1"
+)
+
+// MyAppReconciler reconciles a MyApp object
+type MyAppReconciler struct {
+	client.Client
+	Scheme *runtime.Scheme
+}
+
+// Reconcile is part of the main kubernetes reconciliation loop.
+func (r *MyAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// 1. USE CACHES: client.Get reads directly from the controller-runtime in-memory cache.
+	// It does NOT hammer the Kubernetes API server.
+	var app myappv1.MyApp // Using a hypothetical CRD "MyApp"
+	if err := r.Get(ctx, req.NamespacedName, &app); err != nil {
+		if errors.IsNotFound(err) {
+			return ctrl.Result{}, nil // Object deleted, stop reconciling
+		}
+		// GRACEFUL REQUEUEING (Unexpected Error):
+		// Returning the error triggers exponential backoff (requeues automatically).
+		return ctrl.Result{}, err
+	}
+
+	// Example Business Logic: Check if an underlying Pod is ready
+	var pod corev1.Pod
+	err := r.Get(ctx, client.ObjectKey{Name: app.Name, Namespace: app.Namespace}, &pod)
+	
+	if err != nil && errors.IsNotFound(err) {
+		// ... logic to create the pod goes here (using r.Create) ...
+
+		// GRACEFUL REQUEUEING (Expected Delay):
+		// The pod was just created. We know it takes time to start.
+		// Requeue after 5 seconds instead of returning an error.
+		logger.Info("Pod creating, requeueing to check status later")
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	} else if err != nil {
+		return ctrl.Result{}, err // Unexpected error, backoff
+	}
+
+	// 2. UPDATE STATUS SEPARATELY
+	// We check if the status needs updating. 
+	if app.Status.Phase != "Running" && pod.Status.Phase == corev1.PodRunning {
+		app.Status.Phase = "Running"
+		
+		// ALWAYS use Status().Update() to update the /status subresource.
+		// Never use r.Update() for status changes, as it triggers a Spec update event.
+		if err := r.Status().Update(ctx, &app); err != nil {
+			logger.Error(err, "Failed to update MyApp status")
+			return ctrl.Result{}, err
+		}
+		logger.Info("Successfully updated status to Running")
+	}
+
+	return ctrl.Result{}, nil
+}
+
+// SetupWithManager sets up the controller with the Manager.
+func (r *MyAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&myappv1.MyApp{}). // Watch our Custom Resource
+		// 3. FILTER EVENTS (PREDICATES)
+		// We also watch Pods owned by our CR, but we ONLY care if their annotations change.
+		// We don't want to run the Reconcile loop every time the Pod's CPU usage or Status updates.
+		Owns(&corev1.Pod{}, ctrl.WithEventFilter(annotationChangedPredicate())).
+		Complete(r)
+}
+
+// annotationChangedPredicate is a custom predicate that filters out Update events 
+// unless the annotations of the object have changed.
+func annotationChangedPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			// e.ObjectOld and e.ObjectNew are the states before and after the event
+			if e.ObjectOld == nil || e.ObjectNew == nil {
+				return false
+			}
+
+			// Return true ONLY if annotations are different.
+			// This completely ignores Status updates or ResourceVersion bumps.
+			return !reflect.DeepEqual(e.ObjectOld.GetAnnotations(), e.ObjectNew.GetAnnotations())
+		},
+		CreateFunc: func(e event.CreateEvent) bool {
+			return true // Always reconcile on creation
+		},
+		DeleteFunc: func(e event.DeleteEvent) bool {
+			return true // Always reconcile on deletion
+		},
+	}
+}
