@@ -30,9 +30,9 @@ type ScionPathPolicySpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
 	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
 
-	// foo is an example field of ScionPathPolicy. Edit scionpathpolicy_types.go to remove/update
+	// preference Means "low_latency", "high_throughput", "redundant",
 	// +optional
-	Foo *string `json:"foo,omitempty"`
+	Preference *string `json:"preference,omitempty"`
 }
 
 // ScionPathPolicyStatus defines the observed state of ScionPathPolicy.

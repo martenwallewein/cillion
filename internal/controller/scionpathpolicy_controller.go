@@ -48,7 +48,7 @@ type EBPFManager interface {
 
 // ScionClient communicates with the SCION Control Service.
 type ScionClient interface {
-	FetchPath(requireISDs []string) (bool, error)
+	FetchPath(preference string) (bool, error)
 }
 
 // ScionPathPolicyReconciler reconciles a ScionPathPolicy object
@@ -111,7 +111,7 @@ func (r *ScionPathPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// 5. Graceful requeue: wait for SCION path without triggering exponential backoff
 	if r.ScionClient != nil {
-		scionPathReady, err := r.ScionClient.FetchPath(policy.Spec.RequireISDs)
+		scionPathReady, err := r.ScionClient.FetchPath(*policy.Spec.Preference)
 		if err != nil {
 			log.Error(err, "Failed to contact SCION Control Service")
 			return ctrl.Result{}, err
