@@ -9,90 +9,54 @@
 #include "scion.h"
 #include "maps.h"
 
-// Minimum outer header bytes that must be present before the inner IP packet:
-//   outer IPv4 + outer UDP + SCION common header + SCION IPv4 address header
-// The path header size is variable; actual strip length is computed at runtime.
-#define SCION_BASE_DECAP_LEN (sizeof(struct iphdr)          \
-                            + sizeof(struct udphdr)         \
-                            + sizeof(struct scion_hdr)      \
-                            + sizeof(struct scion_addr_hdr_v4))
+#define SCION_UDP_PORT 30041
+
+// Cilium security identity carried in the SCION E2E extension header.
+struct cilium_e2e_ext
+{
+    __u8 ext_type;
+    __u8 ext_len;
+    __u16 reserved;
+    __u32 security_identity;
+};
 
 // ---------------------------------------------------------------------------
 // Static helper stubs
 // ---------------------------------------------------------------------------
 
-// Return a pointer to the SCION path meta header given the byte offset of the
-// SCION common header inside the XDP frame, or NULL on bounds violation.
 static __always_inline struct scion_path_meta_hdr *
 parse_path_meta(void *data, void *data_end, int scion_off)
 {
-    int meta_off = scion_off
-                 + (int)sizeof(struct scion_hdr)
-                 + (int)sizeof(struct scion_addr_hdr_v4);
+    int meta_off = scion_off + (int)sizeof(struct scion_hdr) + (int)sizeof(struct scion_addr_hdr_v4);
     struct scion_path_meta_hdr *meta = data + meta_off;
     if ((void *)(meta + 1) > data_end)
         return NULL;
     return meta;
 }
 
-// Locate the active hop field described by meta->cur_hf.
-// Returns NULL if the field would exceed data_end.
 static __always_inline struct scion_hop_field *
 get_current_hop_field(void *data, void *data_end,
                       int scion_off, const struct scion_path_meta_hdr *meta)
 {
-    // Path header layout: [info fields …][hop fields …]
-    // Each info field is sizeof(struct scion_info_field); each hop field is
-    // sizeof(struct scion_hop_field).  cur_hf is the index into the hop fields
-    // array (0-based) counting from after all info fields.
-    int path_off = scion_off
-                 + (int)sizeof(struct scion_hdr)
-                 + (int)sizeof(struct scion_addr_hdr_v4)
-                 + (int)sizeof(struct scion_path_meta_hdr)
-                 + (int)(meta->num_inf * sizeof(struct scion_info_field))
-                 + (int)(meta->cur_hf  * sizeof(struct scion_hop_field));
+    int path_off = scion_off + (int)sizeof(struct scion_hdr) + (int)sizeof(struct scion_addr_hdr_v4) + (int)sizeof(struct scion_path_meta_hdr) + (int)(meta->num_inf * sizeof(struct scion_info_field)) + (int)(meta->cur_hf * sizeof(struct scion_hop_field));
     struct scion_hop_field *hf = data + path_off;
     if ((void *)(hf + 1) > data_end)
         return NULL;
     return hf;
 }
 
-// Verify the MAC of the current hop field.
-// Phase 5 work item: requires retrieving the mac_key from scion_path_cache
-// (keyed by the remote AS derived from the SCION address header) and computing
-// AES-CMAC over the hop field.
-static __always_inline int
-verify_hop_mac(const struct scion_path_entry *path __attribute__((unused)),
-               const struct scion_hop_field   *hf   __attribute__((unused)))
-{
-    // TODO: implement AES-CMAC verification or delegate to control plane.
-    return 0; // 0 = OK
-}
-
-// Compute the total outer header length to strip, including the variable-length
-// path header derived from the path meta.
-// Returns a negative value if bounds check fails.
-static __always_inline int
-scion_decap_len(const struct scion_path_meta_hdr *meta)
-{
-    int path_hdr_len = (int)sizeof(struct scion_path_meta_hdr)
-                     + (int)(meta->num_inf * sizeof(struct scion_info_field))
-                     + (int)(meta->num_hf  * sizeof(struct scion_hop_field));
-    return (int)SCION_BASE_DECAP_LEN + path_hdr_len;
-}
-
 // ---------------------------------------------------------------------------
-// XDP ingress entry point
+// XDP Ingress Entry Point (Attached to Physical Interface e.g., eth0)
 // ---------------------------------------------------------------------------
 
 SEC("xdp")
 int xdp_ingress(struct xdp_md *ctx)
 {
-    void *data     = (void *)(long)ctx->data;
+    void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
 
-    // Fast-path minimum size check before any pointer arithmetic.
-    if (data + SCION_BASE_DECAP_LEN + sizeof(struct ethhdr) > data_end)
+    // Fast bounds check
+    if (data + sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct udphdr) > data_end)
         return XDP_PASS;
 
     struct ethhdr *eth = data;
@@ -107,53 +71,78 @@ int xdp_ingress(struct xdp_md *ctx)
         return XDP_PASS;
 
     // --- Outer UDP ---
-    int udp_off = sizeof(struct ethhdr) + outer_iph->ihl * 4;
+    int udp_off = sizeof(struct ethhdr) + (outer_iph->ihl * 4);
     struct udphdr *outer_udp = data + udp_off;
     if ((void *)(outer_udp + 1) > data_end)
         return XDP_PASS;
 
-    // Ignore anything that is not SCION traffic.
-    if (outer_udp->dest != bpf_htons(DISPATCHER_PORT))
+    // Filter: Is this SCION WAN traffic?
+    if (outer_udp->dest != bpf_htons(SCION_UDP_PORT))
         return XDP_PASS;
 
     // --- SCION common header ---
     int scion_off = udp_off + (int)sizeof(struct udphdr);
     struct scion_hdr *scion = data + scion_off;
     if ((void *)(scion + 1) > data_end)
-        return XDP_DROP;
+        return XDP_DROP; // Drop malformed SCION traffic
 
     // --- SCION path meta header ---
     struct scion_path_meta_hdr *meta = parse_path_meta(data, data_end, scion_off);
     if (!meta)
         return XDP_DROP;
 
-    // --- Current hop field ---
+    // --- Current hop field (MAC validation in Phase 5) ---
     struct scion_hop_field *hf = get_current_hop_field(data, data_end, scion_off, meta);
     if (!hf)
         return XDP_DROP;
-
-    // MAC verification (stub; enabled once Phase 5 key lookup is in place).
-    // if (verify_hop_mac(path, hf) < 0)
-    //     return XDP_DROP;
     (void)hf;
 
-    // Calculate exact strip length including the variable-length path header.
-    int strip = scion_decap_len(meta);
-    if (strip < 0)
+    // --- Calculate exact encapsulation length ---
+    // This is everything BETWEEN the Ethernet header and the Inner IP header.
+    int path_hdr_len = (int)sizeof(struct scion_path_meta_hdr) + (int)(meta->num_inf * sizeof(struct scion_info_field)) + (int)(meta->num_hf * sizeof(struct scion_hop_field));
+
+    int encap_len = (outer_iph->ihl * 4) + sizeof(struct udphdr) + sizeof(struct scion_hdr) + sizeof(struct scion_addr_hdr_v4) + path_hdr_len + sizeof(struct cilium_e2e_ext);
+
+    // Ensure we don't read past the end of the packet before adjusting
+    if (data + sizeof(struct ethhdr) + encap_len > data_end)
         return XDP_DROP;
 
-    // Strip the Ethernet header offset as well; bpf_xdp_adjust_head moves
-    // ctx->data forward, exposing the inner IP packet directly.
-    strip += (int)sizeof(struct ethhdr);
+    // -----------------------------------------------------------------------
+    // XDP Decapsulation Magic (The Ethernet Shift)
+    // -----------------------------------------------------------------------
 
-    // Verify the inner IP packet fits before committing the strip.
-    if (data + strip + (int)sizeof(struct iphdr) > data_end)
+    // 1. Copy the original Ethernet header to the eBPF stack (14 bytes)
+    // We need to preserve the MAC addresses so the kernel accepts the inner IP packet.
+    struct ethhdr orig_eth = *eth;
+    orig_eth.h_proto = bpf_htons(ETH_P_IP); // Ensure inner protocol is set correctly
+
+    // 2. Shrink the packet by `encap_len`.
+    // This moves `ctx->data` forward, chopping off BOTH the original ETH header
+    // and the entire SCION/UDP encapsulation stack.
+    if (bpf_xdp_adjust_head(ctx, encap_len) != 0)
         return XDP_DROP;
 
-    if (bpf_xdp_adjust_head(ctx, strip) != 0)
+    // 3. Re-evaluate pointers after adjustment!
+    data = (void *)(long)ctx->data;
+    data_end = (void *)(long)ctx->data_end;
+
+    // 4. Verify we have enough room to write the Ethernet header back
+    if (data + sizeof(struct ethhdr) > data_end)
         return XDP_DROP;
 
-    // The inner IP packet is now at ctx->data; pass it up to the base CNI.
+    // 5. Write the Ethernet header back onto the front of the inner packet
+    struct ethhdr *new_eth = data;
+    *new_eth = orig_eth;
+
+    // Check that the Inner payload is actually an IP packet
+    struct iphdr *inner_iph = (void *)(new_eth + 1);
+    if ((void *)(inner_iph + 1) > data_end)
+        return XDP_DROP;
+
+    // bpf_printk("CilION [Ingress XDP] | Decapsulated! Inner Dst IP: %x\n", bpf_ntohl(inner_iph->daddr));
+
+    // Pass the clean inner IP packet up the Linux stack.
+    // It will be allocated an SKB and hit Cilium's ingress TC program natively.
     return XDP_PASS;
 }
 

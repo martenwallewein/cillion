@@ -11,17 +11,14 @@
 #include "scion.h"
 #include "maps.h"
 
-// Byte count of the header stack prepended during encapsulation:
-//   outer IPv4 + outer UDP + SCION common header + SCION IPv4 address header
-#define SCION_ENCAP_LEN ((__u32)(sizeof(struct iphdr)          \
-                               + sizeof(struct udphdr)         \
-                               + sizeof(struct scion_hdr)      \
-                               + sizeof(struct scion_addr_hdr_v4)))
+#define SCION_UDP_PORT 30041
+#define MAX_PATH_LEN 256
 
 // Cilium security identity carried in the SCION E2E extension header.
-struct cilium_e2e_ext {
-    __u8  ext_type;          // SCION end-to-end extension type
-    __u8  ext_len;           // Extension length in 4-byte units
+struct cilium_e2e_ext
+{
+    __u8 ext_type; // SCION end-to-end extension type
+    __u8 ext_len;  // Extension length in 4-byte units
     __u16 reserved;
     __u32 security_identity; // Cilium numeric identity of the source Pod
 };
@@ -30,8 +27,6 @@ struct cilium_e2e_ext {
 // Static helper stubs
 // ---------------------------------------------------------------------------
 
-// Validate and return a pointer to the Ethernet header; advances *off past it.
-// Returns NULL when the frame is too short.
 static __always_inline struct ethhdr *
 parse_eth(void *data, void *data_end, int *off)
 {
@@ -42,9 +37,6 @@ parse_eth(void *data, void *data_end, int *off)
     return eth;
 }
 
-// Validate and return a pointer to the IPv4 header starting at *off.
-// Advances *off to the first byte after the IP options.
-// Returns NULL on bounds violation or non-IPv4.
 static __always_inline struct iphdr *
 parse_ipv4(void *data, void *data_end, int *off)
 {
@@ -57,65 +49,87 @@ parse_ipv4(void *data, void *data_end, int *off)
     return iph;
 }
 
-// Clamp the TCP MSS option in a SYN segment to avoid post-encapsulation
-// fragmentation.  The overhead budget is SCION_ENCAP_LEN bytes.
-// TODO: implement full TCP option walk and MSS rewrite via bpf_skb_store_bytes.
+// Clamp the TCP MSS option in a SYN segment to avoid post-encapsulation fragmentation.
 static __always_inline int
-clamp_tcp_mss(struct __sk_buff *skb, int tcp_off)
+clamp_tcp_mss(struct __sk_buff *skb, int tcp_off, __u32 encap_len)
 {
-    // Phase 5 work item.
-    (void)skb; (void)tcp_off;
-    return 0;
-}
-
-// Compute the AES-CMAC over a hop field using the cached mac_key.
-// Phase 5: initially the Go agent pre-computes the MAC and bakes it into
-// hop_fields[]; this stub is reserved for a future in-kernel implementation.
-static __always_inline int
-compute_hop_mac(const struct scion_path_entry *entry __attribute__((unused)),
-                const struct scion_hop_field   *hf    __attribute__((unused)),
-                __u64 *out_mac)
-{
-    // TODO: implement via bpf_crypto_ctx or delegate to control plane.
-    *out_mac = 0;
-    return 0;
-}
-
-// Write the full outer header stack (outer IPv4, outer UDP, SCION common,
-// SCION address header, and Cilium E2E extension) into the headroom that
-// bpf_skb_adjust_room() just opened up.
-// inner_iph and path must still be valid at call time (caller re-checks bounds).
-static __always_inline int
-write_scion_headers(struct __sk_buff *skb,
-                    const struct iphdr            *inner_iph,
-                    const struct scion_path_entry *path,
-                    __u32                          policy_id)
-{
-    // TODO:
-    //  1. Build struct iphdr  (src = node IP, dst = path->next_hop_ip,
-    //                          proto = UDP, tot_len covers everything below).
-    //  2. Build struct udphdr (sport = ephemeral, dport = DISPATCHER_PORT).
-    //  3. Build struct scion_hdr from path metadata.
-    //  4. Build struct scion_addr_hdr_v4 (local ISD-AS → remote ISD-AS).
-    //  5. Copy path->hop_fields[0..path->path_len] for the path header.
-    //  6. Append struct cilium_e2e_ext with the Pod's Cilium identity.
-    //  7. Write each struct with bpf_skb_store_bytes().
-    //  8. Fix outer IPv4 checksum with bpf_l3_csum_replace().
-    (void)skb; (void)inner_iph; (void)path; (void)policy_id;
+    // Phase 5 work item: Decrease MSS by exactly `encap_len`
+    (void)skb;
+    (void)tcp_off;
+    (void)encap_len;
     return 0;
 }
 
 // ---------------------------------------------------------------------------
-// TC egress entry point
+// Encapsulation Logic
+// ---------------------------------------------------------------------------
+
+// Write the full outer header stack into the newly opened headroom.
+static __always_inline int
+write_scion_headers(struct __sk_buff *skb,
+                    const struct scion_path_entry *path,
+                    __u32 encap_len)
+{
+    void *data = (void *)(long)skb->data;
+    void *data_end = (void *)(long)skb->data_end;
+
+    // 1. Re-evaluate Ethernet header after adjust_room
+    struct ethhdr *eth = data;
+    if ((void *)(eth + 1) > data_end)
+        return -1;
+
+    // 2. Overwrite the Destination MAC to the SCION Border Router (Next-Hop)
+    // The source MAC remains the node's physical NIC MAC.
+    __builtin_memcpy(eth->h_dest, path->next_hop_mac, ETH_ALEN);
+    eth->h_proto = bpf_htons(ETH_P_IP);
+
+    // 3. Construct Outer IPv4 Header
+    struct iphdr *outer_ip = (void *)(eth + 1);
+    if ((void *)(outer_ip + 1) > data_end)
+        return -1;
+
+    outer_ip->ihl = 5;
+    outer_ip->version = 4;
+    outer_ip->tos = 0;
+    // Total length is the new entire packet minus the Ethernet header
+    outer_ip->tot_len = bpf_htons(skb->len - sizeof(struct ethhdr));
+    outer_ip->id = 0;
+    outer_ip->frag_off = 0;
+    outer_ip->ttl = 64;
+    outer_ip->protocol = IPPROTO_UDP;
+    outer_ip->check = 0; // Checksum calculation deferred/offloaded
+
+    // In a production environment, the Node IP should be passed via the map.
+    // For now, we rely on SNAT or leave the pod IP if Hetzner routes it.
+    outer_ip->daddr = path->next_hop_ip;
+
+    // 4. Construct Outer UDP Header
+    struct udphdr *outer_udp = (void *)(outer_ip + 1);
+    if ((void *)(outer_udp + 1) > data_end)
+        return -1;
+
+    outer_udp->source = bpf_htons(SCION_UDP_PORT); // Ephemeral or static
+    outer_udp->dest = bpf_htons(SCION_UDP_PORT);
+    outer_udp->len = bpf_htons(skb->len - sizeof(struct ethhdr) - sizeof(struct iphdr));
+    outer_udp->check = 0; // UDP checksum of 0 is valid in IPv4
+
+    // 5. Build SCION Common, Address, and Path headers
+    // (Phase 2 & 4 implementation details)
+
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// TC Egress Entry Point (Attached to Physical Interface e.g., eth0)
 // ---------------------------------------------------------------------------
 
 SEC("tc")
 int tc_egress(struct __sk_buff *skb)
 {
-    void *data     = (void *)(long)skb->data;
+    void *data = (void *)(long)skb->data;
     void *data_end = (void *)(long)skb->data_end;
-
     int off = 0;
+
     struct ethhdr *eth = parse_eth(data, data_end, &off);
     if (!eth)
         return TC_ACT_OK;
@@ -127,31 +141,47 @@ int tc_egress(struct __sk_buff *skb)
     if (!iph)
         return TC_ACT_OK;
 
-    // Lookup the SCION policy for this Pod's source IP.
-    __u32 src_ip   = iph->saddr;
-    __u32 *pol_id  = bpf_map_lookup_elem(&pod_policy_map, &src_ip);
+    // 1. Map Lookup: Does this cleartext Pod IP have a SCION routing policy?
+    __u32 src_ip = iph->saddr;
+    __u32 *pol_id = bpf_map_lookup_elem(&pod_policy_map, &src_ip);
     if (!pol_id)
-        return TC_ACT_OK; // Pod has no SCION policy; let normal routing handle it.
+        return TC_ACT_OK; // No policy; let standard BGP/Linux routing handle it.
 
+    // 2. Fetch the pre-computed SCION path
     struct scion_path_entry *path = bpf_map_lookup_elem(&scion_path_cache, pol_id);
     if (!path)
-        return TC_ACT_OK; // No active path yet; control plane hasn't converged.
+        return TC_ACT_OK; // Policy exists, but Agent hasn't fetched the path yet.
 
-    // Clamp MSS on outgoing TCP SYNs before we add header overhead.
-    if (iph->protocol == IPPROTO_TCP) {
-        clamp_tcp_mss(skb, off);
-        // Re-fetch after potential store (clamp_tcp_mss is a no-op stub for now).
-        data     = (void *)(long)skb->data;
-        data_end = (void *)(long)skb->data_end;
+    // 3. Verifier Safety bounds check
+    __u32 path_len = path->path_len;
+    if (path_len > MAX_PATH_LEN)
+        return TC_ACT_SHOT;
+
+    // 4. Dynamically calculate exact encapsulation length
+    __u32 encap_len = sizeof(struct iphdr) +
+                      sizeof(struct udphdr) +
+                      sizeof(struct scion_hdr) +
+                      sizeof(struct scion_addr_hdr_v4) +
+                      path_len +
+                      sizeof(struct cilium_e2e_ext);
+
+    // 5. Clamp MSS on outgoing TCP SYNs before we add header overhead
+    if (iph->protocol == IPPROTO_TCP)
+    {
+        clamp_tcp_mss(skb, off, encap_len);
     }
 
-    // Open headroom for the complete SCION encapsulation header stack.
-    if (bpf_skb_adjust_room(skb, SCION_ENCAP_LEN, BPF_ADJ_ROOM_MAC, 0) < 0)
+    // 6. Open headroom for the complete SCION encapsulation header stack.
+    // BPF_ADJ_ROOM_MAC inserts the space *between* the MAC and IP headers,
+    // which is perfect for IP-in-IP / UDP tunneling.
+    if (bpf_skb_adjust_room(skb, encap_len, BPF_ADJ_ROOM_MAC, 0) < 0)
         return TC_ACT_SHOT;
 
-    // Pointers are stale after adjust_room; write_scion_headers uses offsets.
-    if (write_scion_headers(skb, iph, path, *pol_id) < 0)
+    // 7. Write the Headers
+    if (write_scion_headers(skb, path, encap_len) < 0)
         return TC_ACT_SHOT;
+
+    bpf_printk("CilION [Egress] | Encapsulated Pod IP %x -> SCION Gateway %x\n", src_ip, path->next_hop_ip);
 
     return TC_ACT_OK;
 }
