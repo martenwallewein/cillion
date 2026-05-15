@@ -10,6 +10,7 @@
 
 #include "scion.h"
 #include "maps.h"
+#include "scion_mac.h"
 
 #define SCION_UDP_PORT 30041
 #define MAX_PATH_LEN 256
@@ -113,8 +114,20 @@ write_scion_headers(struct __sk_buff *skb,
     outer_udp->len = bpf_htons(skb->len - sizeof(struct ethhdr) - sizeof(struct iphdr));
     outer_udp->check = 0; // UDP checksum of 0 is valid in IPv4
 
-    // 5. Build SCION Common, Address, and Path headers
-    // (Phase 2 & 4 implementation details)
+    // 5. TODO: Build SCION Common, Address, and Path headers
+    // Full SCION header is done in control plane, need to copy this here
+
+    // Locate the Info Field and our Hop Field
+    struct scion_info_field *inf = (void *)((__u8 *)scion + sizeof(struct scion_hdr) + sizeof(struct scion_addr_hdr_v4) + sizeof(struct scion_path_meta_hdr));
+    struct scion_hop_field *hf = (void *)((__u8 *)inf + (meta->num_inf * sizeof(struct scion_info_field)));
+
+    // Egress Border Router Duty:
+    // If the Global Controller didn't pre-compute the MAC, compute it now!
+    // path->mac_key is fetched from our scion_path_cache eBPF map.
+    if (calculate_scion_mac(path->mac_key, inf, hf, hf->mac) < 0)
+    {
+        return -1;
+    }
 
     return 0;
 }

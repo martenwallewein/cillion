@@ -8,6 +8,7 @@
 
 #include "scion.h"
 #include "maps.h"
+#include "scion_mac.h"
 
 #define SCION_UDP_PORT 30041
 
@@ -106,6 +107,27 @@ int xdp_ingress(struct xdp_md *ctx)
     // Ensure we don't read past the end of the packet before adjusting
     if (data + sizeof(struct ethhdr) + encap_len > data_end)
         return XDP_DROP;
+
+    // --- Info Field ---
+    // We also need the Info Field to verify the MAC
+    struct scion_info_field *inf = (void *)((__u8 *)data + scion_off + sizeof(struct scion_hdr) + sizeof(struct scion_addr_hdr_v4) + sizeof(struct scion_path_meta_hdr));
+    if ((void *)(inf + 1) > data_end)
+        return XDP_DROP;
+
+    // We need the MAC key for our Local AS.
+    // In a real implementation, you would lookup the MAC key from an eBPF map
+    // using the Interface ID or AS number from the packet headers.
+    __u32 local_as_key_id = 0; // Example map key
+    struct scion_path_entry *local_crypto = bpf_map_lookup_elem(&scion_path_cache, &local_as_key_id);
+    if (!local_crypto)
+        return XDP_DROP;
+
+    // Ingress Border Router Duty: MAC VERIFICATION
+    if (verify_scion_mac(local_crypto->mac_key, inf, hf) != 0)
+    {
+        bpf_printk("CilION [Ingress XDP] | DROP: Invalid SCION MAC detected!\n");
+        return XDP_DROP;
+    }
 
     // -----------------------------------------------------------------------
     // XDP Decapsulation Magic (The Ethernet Shift)
