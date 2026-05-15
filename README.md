@@ -23,9 +23,20 @@ CilION flips this paradigm. By turning every Kubernetes worker node into a distr
 2.  **The Distributed Egress:** There is no centralized SCION Gateway bottleneck. Every worker node runs native eBPF programs attached to `tc` and `XDP` hooks, processing SCION encapsulations at line rate.
 3.  **The Transit Uplink:** Nodes route SCION-over-UDP packets to global SCION Transit Providers (Core ASes), fully connecting the cluster to the next-generation internet.
 
-## Getting Started
+## Roadmap and Current Status
+Cilion is currently in an early stage, we're tackling the technical challenges at architectual level before implementing the core feature set.
+
+Current Status: Active Prototyping
+- [x] [Architecture setup and WAN routing defined](./multi-cluster.md).
+- [x] [Technical specification](./specification.md)
+- [x] Kubebuilder setup and operator basics
+- [ ] Connect SCION Control Plane to controller
+- [ ] Kubernetes Operator scaffolding (WIP).
+- [ ] eBPF XDP/tc hook design for SCION packet encapsulation (WIP).
+- [ ] Datapath testing and eBPF map integration.
+
+## Other links
 Please see the following documentation to understand the architecture and research goals:
-*   [📖 Architecture & Technical Specification](specification.md)
 *   [🌍 Sophisticated Use Cases](use-cases.md)
 
 ---
