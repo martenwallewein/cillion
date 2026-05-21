@@ -27,7 +27,8 @@ import (
 // kernel map instances. The TC objects' maps are used as the canonical write
 // targets; the XDP program reads the same logical maps but via separate FDs.
 // TODO: pin maps to bpffs and pass them via CollectionOptions.MapReplacements
-//       so TC and XDP operate on a single shared kernel map.
+//
+//	so TC and XDP operate on a single shared kernel map.
 type Loader struct {
 	tcObjs  TcEgressObjects
 	xdpObjs XdpIngressObjects

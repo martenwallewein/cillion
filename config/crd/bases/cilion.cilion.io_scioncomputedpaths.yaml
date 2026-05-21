@@ -4,20 +4,20 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.1
-  name: scionpathpolicies.cilion.cilion.io
+  name: scioncomputedpaths.cilion.cilion.io
 spec:
   group: cilion.cilion.io
   names:
-    kind: ScionPathPolicy
-    listKind: ScionPathPolicyList
-    plural: scionpathpolicies
-    singular: scionpathpolicy
+    kind: ScionComputedPath
+    listKind: ScionComputedPathList
+    plural: scioncomputedpaths
+    singular: scioncomputedpath
   scope: Namespaced
   versions:
   - name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: ScionPathPolicy is the Schema for the scionpathpolicies API
+        description: ScionComputedPath is the Schema for the scioncomputedpaths API
         properties:
           apiVersion:
             description: |-
@@ -37,73 +37,35 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of ScionPathPolicy
+            description: ScionComputedPathSpec defines the desired state of ScionComputedPath
             properties:
-              podSelector:
-                description: PodSelector targets specific pods. If empty, it applies
-                  to all pods in the namespace.
-                properties:
-                  matchExpressions:
-                    description: matchExpressions is a list of label selector requirements.
-                      The requirements are ANDed.
-                    items:
-                      description: |-
-                        A label selector requirement is a selector that contains values, a key, and an operator that
-                        relates the key and values.
-                      properties:
-                        key:
-                          description: key is the label key that the selector applies
-                            to.
-                          type: string
-                        operator:
-                          description: |-
-                            operator represents a key's relationship to a set of values.
-                            Valid operators are In, NotIn, Exists and DoesNotExist.
-                          type: string
-                        values:
-                          description: |-
-                            values is an array of string values. If the operator is In or NotIn,
-                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
-                            the values array must be empty. This array is replaced during a strategic
-                            merge patch.
-                          items:
-                            type: string
-                          type: array
-                          x-kubernetes-list-type: atomic
-                      required:
-                      - key
-                      - operator
-                      type: object
-                    type: array
-                    x-kubernetes-list-type: atomic
-                  matchLabels:
-                    additionalProperties:
-                      type: string
-                    description: |-
-                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
-                      map is equivalent to an element of matchExpressions, whose key field is "key", the
-                      operator is "In", and the values array contains only "value". The requirements are ANDed.
-                    type: object
-                type: object
-                x-kubernetes-map-type: atomic
-              preference:
-                description: preference Means "low_latency", "high_throughput", "redundant",
+              destinationCidr:
+                description: DestinationCIDR is the subnet of the remote cluster (e.g.,
+                  10.244.2.0/24)
                 type: string
+              hopFields:
+                description: HopFields contains the raw byte array of the SCION cryptographic
+                  path for eBPF
+                format: byte
+                type: string
+              nextHopIP:
+                description: NextHopIP is the SCION Border Router / Transit Provider
+                  IP
+                type: string
+              policyRef:
+                description: PolicyRef points back to the ScionPathPolicy that generated
+                  this path
+                type: string
+            required:
+            - destinationCidr
+            - hopFields
+            - nextHopIP
+            - policyRef
             type: object
           status:
-            description: status defines the observed state of ScionPathPolicy
+            description: ScionComputedPathStatus defines the observed state of ScionComputedPath
             properties:
               conditions:
-                description: |-
-                  conditions represent the current state of the ScionPathPolicy resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -159,12 +121,11 @@ spec:
                   - type
                   type: object
                 type: array
-                x-kubernetes-list-map-keys:
-                - type
-                x-kubernetes-list-type: map
             type: object
         required:
+        - metadata
         - spec
+        - status
         type: object
     served: true
     storage: true

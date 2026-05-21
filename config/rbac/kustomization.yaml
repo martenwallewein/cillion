@@ -22,6 +22,12 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the cilion itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
+- scionclusterpeer_admin_role.yaml
+- scionclusterpeer_editor_role.yaml
+- scionclusterpeer_viewer_role.yaml
+- scioncomputedpath_admin_role.yaml
+- scioncomputedpath_editor_role.yaml
+- scioncomputedpath_viewer_role.yaml
 - scionpathpolicy_admin_role.yaml
 - scionpathpolicy_editor_role.yaml
 - scionpathpolicy_viewer_role.yaml

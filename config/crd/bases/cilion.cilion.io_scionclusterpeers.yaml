@@ -4,20 +4,20 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.1
-  name: scionpathpolicies.cilion.cilion.io
+  name: scionclusterpeers.cilion.cilion.io
 spec:
   group: cilion.cilion.io
   names:
-    kind: ScionPathPolicy
-    listKind: ScionPathPolicyList
-    plural: scionpathpolicies
-    singular: scionpathpolicy
+    kind: ScionClusterPeer
+    listKind: ScionClusterPeerList
+    plural: scionclusterpeers
+    singular: scionclusterpeer
   scope: Namespaced
   versions:
   - name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: ScionPathPolicy is the Schema for the scionpathpolicies API
+        description: ScionClusterPeer is the Schema for the scionclusterpeers API
         properties:
           apiVersion:
             description: |-
@@ -37,73 +37,24 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of ScionPathPolicy
+            description: ScionClusterPeerSpec defines the desired state of ScionClusterPeer
             properties:
-              podSelector:
-                description: PodSelector targets specific pods. If empty, it applies
-                  to all pods in the namespace.
-                properties:
-                  matchExpressions:
-                    description: matchExpressions is a list of label selector requirements.
-                      The requirements are ANDed.
-                    items:
-                      description: |-
-                        A label selector requirement is a selector that contains values, a key, and an operator that
-                        relates the key and values.
-                      properties:
-                        key:
-                          description: key is the label key that the selector applies
-                            to.
-                          type: string
-                        operator:
-                          description: |-
-                            operator represents a key's relationship to a set of values.
-                            Valid operators are In, NotIn, Exists and DoesNotExist.
-                          type: string
-                        values:
-                          description: |-
-                            values is an array of string values. If the operator is In or NotIn,
-                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
-                            the values array must be empty. This array is replaced during a strategic
-                            merge patch.
-                          items:
-                            type: string
-                          type: array
-                          x-kubernetes-list-type: atomic
-                      required:
-                      - key
-                      - operator
-                      type: object
-                    type: array
-                    x-kubernetes-list-type: atomic
-                  matchLabels:
-                    additionalProperties:
-                      type: string
-                    description: |-
-                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
-                      map is equivalent to an element of matchExpressions, whose key field is "key", the
-                      operator is "In", and the values array contains only "value". The requirements are ANDed.
-                    type: object
-                type: object
-                x-kubernetes-map-type: atomic
-              preference:
-                description: preference Means "low_latency", "high_throughput", "redundant",
+              podCIDR:
+                description: PodCIDR is the IP subnet assigned to the remote cluster's
+                  pods
                 type: string
+              remoteAS:
+                description: RemoteAS is the SCION ISD-AS of the remote cluster (e.g.,
+                  "64-ffaa:0:1102")
+                type: string
+            required:
+            - podCIDR
+            - remoteAS
             type: object
           status:
-            description: status defines the observed state of ScionPathPolicy
+            description: ScionClusterPeerStatus defines the observed state of ScionClusterPeer
             properties:
               conditions:
-                description: |-
-                  conditions represent the current state of the ScionPathPolicy resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -159,12 +110,11 @@ spec:
                   - type
                   type: object
                 type: array
-                x-kubernetes-list-map-keys:
-                - type
-                x-kubernetes-list-type: map
             type: object
         required:
+        - metadata
         - spec
+        - status
         type: object
     served: true
     storage: true

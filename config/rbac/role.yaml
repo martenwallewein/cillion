@@ -5,8 +5,18 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - cilion.cilion.io
   resources:
+  - scionclusterpeers
+  - scioncomputedpaths
   - scionpathpolicies
   verbs:
   - create
@@ -19,13 +29,15 @@ rules:
 - apiGroups:
   - cilion.cilion.io
   resources:
-  - scionpathpolicies/finalizers
+  - scionclusterpeers/finalizers
+  - scioncomputedpaths/finalizers
   verbs:
   - update
 - apiGroups:
   - cilion.cilion.io
   resources:
-  - scionpathpolicies/status
+  - scionclusterpeers/status
+  - scioncomputedpaths/status
   verbs:
   - get
   - patch

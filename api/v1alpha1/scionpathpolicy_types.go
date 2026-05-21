@@ -30,6 +30,10 @@ type ScionPathPolicySpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
 	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
 
+	// PodSelector targets specific pods. If empty, it applies to all pods in the namespace.
+	// +optional
+	PodSelector metav1.LabelSelector `json:"podSelector,omitempty"`
+
 	// preference Means "low_latency", "high_throughput", "redundant",
 	// +optional
 	Preference *string `json:"preference,omitempty"`

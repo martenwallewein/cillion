@@ -10,12 +10,12 @@ import (
 // The field order, sizes, and alignment must match the C struct exactly so
 // that cilium/ebpf can serialise it directly into the scion_path_cache map.
 //
-//   C layout (284 bytes, no padding):
-//     __u32  next_hop_ip      4
-//     __u8   next_hop_mac[6]  6
-//     __u16  path_len         2
-//     __u8   hop_fields[256] 256
-//     __u8   mac_key[16]     16
+//	C layout (284 bytes, no padding):
+//	  __u32  next_hop_ip      4
+//	  __u8   next_hop_mac[6]  6
+//	  __u16  path_len         2
+//	  __u8   hop_fields[256] 256
+//	  __u8   mac_key[16]     16
 type ScionPathEntry struct {
 	NextHopIP  [4]byte
 	NextHopMAC [6]byte

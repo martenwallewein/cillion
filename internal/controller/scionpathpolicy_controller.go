@@ -1,30 +1,20 @@
 /*
 Copyright 2026.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
 */
 
 package controller
 
 import (
 	"context"
-	"reflect"
+	"fmt"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -33,54 +23,49 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	cilionv1alpha1 "github.com/martenwallewein/cilion/api/v1alpha1"
 )
 
-const cilionFinalizer = "cilion.io/finalizer"
+const (
+	cilionFinalizer   = "cilion.io/policy-finalizer"
+	defaultPolicyName = "default-scion-policy"
+)
 
-// EBPFManager handles eBPF map operations for SCION path policies.
-type EBPFManager interface {
-	CheckIfPolicyExists(name string) bool
-	InjectPolicy(spec cilionv1alpha1.ScionPathPolicySpec) error
-	RemovePolicy(name string) error
-}
-
-// ScionClient communicates with the SCION Control Service.
+// ScionClient communicates with the global SCION Control Service.
 type ScionClient interface {
-	FetchPath(preference string) (bool, error)
+	// FetchPath now takes a destination AS and preference, returning the raw eBPF bytes and NextHop.
+	FetchPath(destinationAS string, preference string) (isReady bool, rawHopFields []byte, nextHopIP string, err error)
 }
 
-// ScionPathPolicyReconciler reconciles a ScionPathPolicy object
+// ScionPathPolicyReconciler reconciles a ScionPathPolicy object into ScionComputedPaths.
+// Notice: There is NO EBPFManager here. This is purely Control Plane logic.
 type ScionPathPolicyReconciler struct {
 	client.Client
 	Scheme      *runtime.Scheme
-	EBPFManager EBPFManager
 	ScionClient ScionClient
 }
 
 // +kubebuilder:rbac:groups=cilion.cilion.io,resources=scionpathpolicies,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=cilion.cilion.io,resources=scionpathpolicies/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=cilion.cilion.io,resources=scionpathpolicies/finalizers,verbs=update
+// +kubebuilder:rbac:groups=cilion.cilion.io,resources=scioncomputedpaths,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=cilion.cilion.io,resources=scionclusterpeers,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 
 func (r *ScionPathPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
+	log := logf.FromContext(ctx).WithValues("policy", req.Name)
 
-	// 1. Fetch the Custom Resource (reads from cache — level-triggered)
+	// 1. Fetch the User Intent (ScionPathPolicy)
 	var policy cilionv1alpha1.ScionPathPolicy
 	if err := r.Get(ctx, req.NamespacedName, &policy); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// 2. Handle deletion: run cleanup logic and remove finalizer
+	// 2. Handle Deletion (Cleanup external SCION reservations if necessary)
 	if !policy.ObjectMeta.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&policy, cilionFinalizer) {
-			if r.EBPFManager != nil {
-				if err := r.EBPFManager.RemovePolicy(policy.Name); err != nil {
-					log.Error(err, "Failed to remove policy from eBPF datapath", "name", policy.Name)
-					return ctrl.Result{}, err
-				}
-			}
+			// Note: We don't need to manually delete ScionComputedPaths here
+			// because we use Kubernetes OwnerReferences. K8s Garbage Collection will drop them automatically!
 			controllerutil.RemoveFinalizer(&policy, cilionFinalizer)
 			if err := r.Update(ctx, &policy); err != nil {
 				return ctrl.Result{}, err
@@ -89,84 +74,168 @@ func (r *ScionPathPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, nil
 	}
 
-	// 3. Add finalizer on first reconcile so cleanup runs on deletion
+	// Add finalizer
 	if !controllerutil.ContainsFinalizer(&policy, cilionFinalizer) {
 		controllerutil.AddFinalizer(&policy, cilionFinalizer)
 		if err := r.Update(ctx, &policy); err != nil {
 			return ctrl.Result{}, err
 		}
-		// Return so the update triggers a new reconciliation with the finalizer in place
 		return ctrl.Result{}, nil
 	}
 
-	// 4. Idempotency check: skip injection if eBPF datapath already matches desired state
-	isPolicyActive := false
-	if r.EBPFManager != nil {
-		isPolicyActive = r.EBPFManager.CheckIfPolicyExists(policy.Name)
-	}
-	if isPolicyActive && apimeta.IsStatusConditionTrue(policy.Status.Conditions, "Active") {
-		log.Info("Policy already active in eBPF datapath, no action needed")
-		return ctrl.Result{}, nil
+	// 3. Fetch all known remote clusters (Destinations)
+	var peers cilionv1alpha1.ScionClusterPeerList
+	if err := r.List(ctx, &peers); err != nil {
+		log.Error(err, "Failed to list ScionClusterPeers")
+		return ctrl.Result{}, err
 	}
 
-	// 5. Graceful requeue: wait for SCION path without triggering exponential backoff
-	if r.ScionClient != nil {
-		scionPathReady, err := r.ScionClient.FetchPath(*policy.Spec.Preference)
+	// 4. Compute Paths for EACH destination cluster
+	allPathsReady := true
+
+	for _, peer := range peers.Items {
+		// Contact the SCION daemon to get the cryptographic path for this specific destination
+		isReady, rawHopFields, nextHopIP, err := r.ScionClient.FetchPath(peer.Spec.RemoteAS, *policy.Spec.Preference)
 		if err != nil {
-			log.Error(err, "Failed to contact SCION Control Service")
+			log.Error(err, "Failed to fetch path from SCION Control Service", "destination", peer.Spec.RemoteAS)
 			return ctrl.Result{}, err
 		}
-		if !scionPathReady {
-			log.Info("SCION path not ready, requeueing")
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-		}
-	}
 
-	// 6. Apply desired state to eBPF datapath
-	if r.EBPFManager != nil {
-		if err := r.EBPFManager.InjectPolicy(policy.Spec); err != nil {
-			log.Error(err, "Failed to inject policy into eBPF datapath")
+		if !isReady {
+			log.Info("SCION path not ready yet", "destination", peer.Spec.RemoteAS)
+			allPathsReady = false
+			continue // Check the other peers, but we will requeue at the end
+		}
+
+		// 5. INTENT -> STATE: Generate the ScionComputedPath CRD for the Local Agents
+		computedPathName := fmt.Sprintf("%s-to-%s", policy.Name, peer.Name)
+		computedPath := &cilionv1alpha1.ScionComputedPath{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      computedPathName,
+				Namespace: policy.Namespace,
+			},
+		}
+
+		// CreateOrUpdate ensures Idempotency. It creates the CRD if it doesn't exist,
+		// or updates it if the SCION path has rotated/changed.
+		_, err = controllerutil.CreateOrUpdate(ctx, r.Client, computedPath, func() error {
+			// Link the lifecycle to the parent Policy
+			if err := controllerutil.SetControllerReference(&policy, computedPath, r.Scheme); err != nil {
+				return err
+			}
+			computedPath.Spec.PolicyRef = policy.Name
+			computedPath.Spec.DestinationCIDR = peer.Spec.PodCIDR
+			computedPath.Spec.NextHopIP = nextHopIP
+			computedPath.Spec.HopFields = rawHopFields
+			return nil
+		})
+
+		if err != nil {
+			log.Error(err, "Failed to create/update ScionComputedPath", "computedPath", computedPathName)
 			return ctrl.Result{}, err
 		}
+		log.Info("Successfully generated ScionComputedPath", "destination", peer.Name)
 	}
-	log.Info("Injected policy into eBPF datapath", "name", policy.Name)
 
-	// 7. Update status separately — never modify Spec here
+	// 6. Graceful Requeue if any destination paths were missing
+	if !allPathsReady {
+		log.Info("Some destination paths were not ready. Requeueing...")
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
+	// 7. Update Status on the user's Policy CRD
 	apimeta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
-		Type:               "Active",
+		Type:               "Ready",
 		Status:             metav1.ConditionTrue,
-		Reason:             "PolicyInjected",
-		Message:            "Policy is active in the eBPF datapath",
+		Reason:             "PathsComputed",
+		Message:            fmt.Sprintf("Computed paths for %d destinations", len(peers.Items)),
 		ObservedGeneration: policy.Generation,
 	})
 	if err := r.Status().Update(ctx, &policy); err != nil {
-		log.Error(err, "Failed to update ScionPathPolicy status")
 		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, nil
 }
 
-// SetupWithManager sets up the controller with the Manager.
+// SetupWithManager wires up the event watches.
 func (r *ScionPathPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	// Only reconcile on Spec changes (generation bump), not Status-only updates
-	podLabelChangedPredicate := predicate.Funcs{
+
+	// Predicate: Only wake up if a Pod is newly assigned an IP by Cilium
+	podIPAssignedPredicate := predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			oldPod, okOld := e.ObjectOld.(*corev1.Pod)
 			newPod, okNew := e.ObjectNew.(*corev1.Pod)
 			if !okOld || !okNew {
 				return false
 			}
-			return !reflect.DeepEqual(oldPod.Labels, newPod.Labels)
+			// Trigger when the Pod transitions from having no IP to having one
+			return oldPod.Status.PodIP == "" && newPod.Status.PodIP != ""
+		},
+		CreateFunc: func(e event.CreateEvent) bool {
+			pod, ok := e.Object.(*corev1.Pod)
+			return ok && pod.Status.PodIP != ""
 		},
 	}
 
+	// MapFunc: When a Pod gets an IP, which Policy should we reconcile?
+	// This ensures the Global Controller computes a path for the pod's default or matched policy.
+	podToPolicyMapper := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+		pod, ok := obj.(*corev1.Pod)
+		if !ok {
+			return nil
+		}
+
+		// List all ScionPathPolicies in the pod's namespace
+		var policies cilionv1alpha1.ScionPathPolicyList
+		r.Client.List(ctx, &policies, client.InNamespace(pod.Namespace))
+
+		var requests []reconcile.Request
+		hasSpecificPolicy := false
+
+		// Inside your podToPolicyMapper:
+		for _, p := range policies.Items {
+			// Convert the CRD's LabelSelector to a real K8s Selector
+			selector, err := metav1.LabelSelectorAsSelector(&p.Spec.PodSelector)
+			if err != nil {
+				continue
+			}
+
+			// Check if the Pod's labels match the Policy's selector
+			if selector.Matches(labels.Set(pod.Labels)) {
+				requests = append(requests, reconcile.Request{
+					NamespacedName: types.NamespacedName{Name: p.Name, Namespace: p.Namespace},
+				})
+				hasSpecificPolicy = true
+			}
+		}
+
+		// If the Pod doesn't match any specific App-Aware policy, enqueue the Default Policy
+		if !hasSpecificPolicy {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: defaultPolicyName, Namespace: "kube-system"},
+			})
+		}
+
+		return requests
+	})
+
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&cilionv1alpha1.ScionPathPolicy{},
-			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
-		Watches(&corev1.Pod{},
+		// 1. Watch User Intent Policies
+		For(&cilionv1alpha1.ScionPathPolicy{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		// 2. Watch Pod IP Assignments to ensure policies are proactively computed
+		Watches(
+			&corev1.Pod{},
+			podToPolicyMapper,
+			builder.WithPredicates(podIPAssignedPredicate),
+		).
+		// 3. Watch Remote Destinations (if a new cluster is added, recalculate all policies!)
+		Watches(
+			&cilionv1alpha1.ScionClusterPeer{},
 			&handler.EnqueueRequestForObject{},
-			builder.WithPredicates(podLabelChangedPredicate)).
-		Named("scionpathpolicy").
+		).
+		Named("global-scion-policy-controller").
 		Complete(r)
+
+	return nil
 }

@@ -1,0 +1,9 @@
+apiVersion: cilion.cilion.io/v1alpha1
+kind: ScionClusterPeer
+metadata:
+  labels:
+    app.kubernetes.io/name: cilion
+    app.kubernetes.io/managed-by: kustomize
+  name: scionclusterpeer-sample
+spec:
+  # TODO(user): Add fields here

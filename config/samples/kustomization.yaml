@@ -1,4 +1,6 @@
 ## Append samples of your project ##
 resources:
 - cilion_v1alpha1_scionpathpolicy.yaml
+- cilion_v1alpha1_scioncomputedpath.yaml
+- cilion_v1alpha1_scionclusterpeer.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples
